@@ -46,9 +46,11 @@
             "UNDER REVIEW",
             "ASSIGNED",
             "IN PROGRESS",
+            "RESOLUTION SUBMITTED",
             "AWAITING CITIZEN VERIFICATION",
             "RESOLVED",
-            "REOPENED"
+            "REOPENED",
+            "REJECTED"
           ]
         },
         "citizenId": { "type": "string", "maxLength": 128 },

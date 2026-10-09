@@ -42,7 +42,7 @@ try {
     // CRITICAL: Must specify firestoreDatabaseId from firebase-applet-config.json
     dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
     authInstance = getAuth(app);
-    storageInstance = getStorage(app);
+    storageInstance = getStorage(app, firebaseConfig.storageBucket || undefined);
     configured = true;
   }
 } catch (err) {

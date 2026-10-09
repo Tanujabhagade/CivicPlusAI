@@ -28,6 +28,7 @@ import {
   HardHat,
   ImagePlus,
   Layers3,
+  Loader2,
   LocateFixed,
   MapPin,
   Menu,
@@ -59,10 +60,18 @@ import { CivicGeoMap, type MapPosition } from "@/components/CivicGeoMap";
 import { useAuth } from "@/context/AuthContext";
 import {
   subscribeToIssues,
+  subscribeToIssueTimeline,
   saveIssueToFirestore,
+  updateIssueInFirestore,
   updateIssueStatusInFirestore,
+  deriveMilestonesForIssue,
+  formatTimelineTimestamp,
 } from "@/services/issueDataService";
-import { uploadEvidenceImage } from "@/services/firebaseStorageService";
+import {
+  uploadEvidenceImage,
+  isDurableImageUrl,
+  sanitizeImageUrl,
+} from "@/services/firebaseStorageService";
 import {
   createDemoIssues,
   defaultCivicSettings,
@@ -73,6 +82,7 @@ import {
   wards,
   civicAreas,
   type CivicIssue,
+  type CivicTimelineRecord,
   type CivicRole,
   type CivicSettings,
   type CivicStatus,
@@ -165,7 +175,8 @@ const defaultTimeline = (): CivicTimelineEvent[] => [
 function normalizeIssue(issue: Partial<CivicIssue>, index: number): CivicIssue {
   const latitude = issue.latitude ?? issue.lat ?? 19.77;
   const longitude = issue.longitude ?? 74.55;
-  return {
+  const currentStatus = issue.status ?? "NEW";
+  const normalized: CivicIssue = {
     id: issue.id ?? `CP-2026-${String(index + 1).padStart(5, "0")}`,
     title: issue.title ?? "Civic issue",
     category: issue.category ?? categories[0] ?? "Infrastructure",
@@ -173,7 +184,7 @@ function normalizeIssue(issue: Partial<CivicIssue>, index: number): CivicIssue {
     ward: issue.ward ?? "Demo Ward",
     department: issue.department ?? departments[0] ?? "Infrastructure",
     priority: issue.priority ?? "Medium",
-    status: issue.status ?? "NEW",
+    status: currentStatus,
     age: issue.age ?? "Just now",
     citizen: issue.citizen ?? "Rahul Sharma",
     description: issue.description ?? "Civic issue reported by a resident.",
@@ -191,13 +202,19 @@ function normalizeIssue(issue: Partial<CivicIssue>, index: number): CivicIssue {
     impact: issue.impact ?? "Localized disruption reported by residents.",
     duplicateIds: issue.duplicateIds ?? [],
     notes: issue.notes ?? [],
-    timeline: issue.timeline ?? defaultTimeline(),
+    timelineRecords: issue.timelineRecords ?? [],
+    timeline: deriveMilestonesForIssue(
+      { ...issue, status: currentStatus, latitude, longitude },
+      issue.timelineRecords,
+    ),
     ...(issue.assignedOfficer ? { assignedOfficer: issue.assignedOfficer } : {}),
     ...(issue.resolutionNotes ? { resolutionNotes: issue.resolutionNotes } : {}),
-    ...(issue.image ? { image: issue.image } : {}),
-    ...(issue.beforeImage ? { beforeImage: issue.beforeImage } : {}),
-    ...(issue.afterImage ? { afterImage: issue.afterImage } : {}),
+    ...(sanitizeImageUrl(issue.image) ? { image: sanitizeImageUrl(issue.image) } : {}),
+    ...(sanitizeImageUrl(issue.beforeImage) ? { beforeImage: sanitizeImageUrl(issue.beforeImage) } : {}),
+    ...(sanitizeImageUrl(issue.afterImage) ? { afterImage: sanitizeImageUrl(issue.afterImage) } : {}),
+    ...(sanitizeImageUrl(issue.resolutionEvidence) ? { resolutionEvidence: sanitizeImageUrl(issue.resolutionEvidence) } : {}),
   };
+  return normalized;
 }
 
 function normalizeIssues(raw: unknown): CivicIssue[] {
@@ -228,7 +245,13 @@ function normalizeSettings(raw: unknown): CivicSettings {
 }
 
 function serializeIssues(issues: CivicIssue[]) {
-  return issues.map(({ image, beforeImage, afterImage, ...issue }) => issue);
+  return issues.map((issue) => ({
+    ...issue,
+    image: sanitizeImageUrl(issue.image),
+    beforeImage: sanitizeImageUrl(issue.beforeImage),
+    afterImage: sanitizeImageUrl(issue.afterImage),
+    resolutionEvidence: sanitizeImageUrl(issue.resolutionEvidence),
+  }));
 }
 
 function CivicPulse() {
@@ -324,53 +347,152 @@ function CivicPulse() {
     );
   };
 
-  const changeStatus = (id: string, status: CivicStatus, note?: string, evidenceImage?: string) => {
+  const changeStatus = (
+    id: string,
+    status: CivicStatus,
+    note?: string,
+    evidenceImage?: string,
+    extraPatch?: Partial<CivicIssue>,
+  ) => {
+    const userRole = role ?? "citizen";
+    if (userRole === "citizen" && status !== "RESOLVED" && status !== "REOPENED") {
+      toast.error("Citizens can only verify resolution or reopen issues.");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const actorName =
+      profile.displayName ||
+      (userRole === "officer"
+        ? "Municipal Officer"
+        : userRole === "admin"
+          ? "Administrator"
+          : "Citizen");
+    const actorRole = profile.role || userRole;
+
+    const durableEvidence = sanitizeImageUrl(evidenceImage);
+    const sanitizedExtraPatch: Partial<CivicIssue> = { ...(extraPatch || {}) };
+    if (sanitizedExtraPatch.beforeImage) sanitizedExtraPatch.beforeImage = sanitizeImageUrl(sanitizedExtraPatch.beforeImage);
+    if (sanitizedExtraPatch.afterImage) sanitizedExtraPatch.afterImage = sanitizeImageUrl(sanitizedExtraPatch.afterImage);
+    if (sanitizedExtraPatch.image) sanitizedExtraPatch.image = sanitizeImageUrl(sanitizedExtraPatch.image);
+    if (sanitizedExtraPatch.resolutionEvidence) sanitizedExtraPatch.resolutionEvidence = sanitizeImageUrl(sanitizedExtraPatch.resolutionEvidence);
+
+    const newRecord: CivicTimelineRecord = {
+      id: `event-${Date.now()}`,
+      issueId: id,
+      status,
+      actorName,
+      actorId: user?.uid || profile.uid,
+      actorRole,
+      note: note || `Status updated to ${prettyStatus(status)}`,
+      evidenceImage: durableEvidence || null,
+      timestamp: now,
+    };
+
     setIssues((current) =>
-      current.map((issue) =>
-        issue.id === id
-          ? {
-              ...issue,
-              status,
-              ...(evidenceImage
-                ? { afterImage: evidenceImage, resolutionEvidence: evidenceImage }
-                : {}),
-              timeline: (issue.timeline ?? []).map((event, index) => ({
-                ...event,
-                done:
-                  index <
-                  (status === "RESOLVED"
-                    ? 4
-                    : status === "AWAITING CITIZEN VERIFICATION"
-                      ? 4
-                      : status === "IN PROGRESS"
-                        ? 3
-                        : 2),
-              })),
-            }
-          : issue,
-      ),
+      current.map((issue) => {
+        if (issue.id !== id) return issue;
+        const records = [...(issue.timelineRecords ?? []), newRecord];
+        const updated: CivicIssue = {
+          ...issue,
+          status,
+          ...sanitizedExtraPatch,
+          ...(status === "RESOLVED" ? { resolvedAt: now, verificationStatus: "VERIFIED" } : {}),
+          ...(status === "REOPENED" ? { verificationStatus: "REJECTED" } : {}),
+          ...(status === "AWAITING CITIZEN VERIFICATION" ? { verificationStatus: "PENDING" } : {}),
+          ...(durableEvidence
+            ? { afterImage: durableEvidence, resolutionEvidence: durableEvidence }
+            : {}),
+          timelineRecords: records,
+        };
+        updated.timeline = deriveMilestonesForIssue(updated, records);
+        return updated;
+      }),
     );
+
     toast.success(`Issue updated to ${prettyStatus(status)}`);
     updateIssueStatusInFirestore(
       id,
       status,
       {
-        name: profile.displayName || "Civic Officer",
+        name: actorName,
         id: user?.uid || profile.uid,
-        role: profile.role,
+        role: actorRole,
       },
       note,
-      evidenceImage,
+      durableEvidence,
+      sanitizedExtraPatch,
     ).catch((err) => console.warn("[CivicPulse] Firestore update warning:", err));
   };
 
-  const updateIssue = (id: string, patch: Partial<CivicIssue>) => {
+  const updateIssue = (
+    id: string,
+    patch: Partial<CivicIssue>,
+    timelineNote?: string,
+  ) => {
+    const userRole = role ?? "citizen";
+    const now = new Date().toISOString();
+    const actorName =
+      profile.displayName ||
+      (userRole === "officer"
+        ? "Municipal Officer"
+        : userRole === "admin"
+          ? "Administrator"
+          : "Citizen");
+    const actorRole = profile.role || userRole;
+
+    const sanitizedPatch: Partial<CivicIssue> = { ...patch };
+    if (sanitizedPatch.image) sanitizedPatch.image = sanitizeImageUrl(sanitizedPatch.image);
+    if (sanitizedPatch.beforeImage) sanitizedPatch.beforeImage = sanitizeImageUrl(sanitizedPatch.beforeImage);
+    if (sanitizedPatch.afterImage) sanitizedPatch.afterImage = sanitizeImageUrl(sanitizedPatch.afterImage);
+    if (sanitizedPatch.resolutionEvidence) sanitizedPatch.resolutionEvidence = sanitizeImageUrl(sanitizedPatch.resolutionEvidence);
+
+    let newRecord: CivicTimelineRecord | null = null;
+    if (timelineNote || sanitizedPatch.assignedOfficer || sanitizedPatch.department || sanitizedPatch.status) {
+      newRecord = {
+        id: `event-${Date.now()}`,
+        issueId: id,
+        status: sanitizedPatch.status || "ASSIGNED",
+        actorName,
+        actorId: user?.uid || profile.uid,
+        actorRole,
+        note:
+          timelineNote ||
+          (sanitizedPatch.assignedOfficer
+            ? `Assigned to ${sanitizedPatch.assignedOfficer} (${sanitizedPatch.department || "Municipal department"})`
+            : sanitizedPatch.department
+              ? `Department set to ${sanitizedPatch.department}`
+              : `Issue details updated`),
+        timestamp: now,
+      };
+    }
+
     setIssues((current) =>
-      current.map((issue) => (issue.id === id ? { ...issue, ...patch } : issue)),
+      current.map((issue) => {
+        if (issue.id !== id) return issue;
+        const records = newRecord
+          ? [...(issue.timelineRecords ?? []), newRecord]
+          : (issue.timelineRecords ?? []);
+        const updated: CivicIssue = {
+          ...issue,
+          ...sanitizedPatch,
+          timelineRecords: records,
+        };
+        updated.timeline = deriveMilestonesForIssue(updated, records);
+        return updated;
+      }),
     );
-    saveIssueToFirestore({ id, ...patch } as CivicIssue).catch((err) =>
-      console.warn("[CivicPulse] Firestore update notice:", err),
-    );
+
+    updateIssueInFirestore(
+      id,
+      sanitizedPatch,
+      {
+        name: actorName,
+        id: user?.uid || profile.uid,
+        role: actorRole,
+      },
+      timelineNote,
+    ).catch((err) => console.warn("[CivicPulse] Firestore update notice:", err));
   };
 
   const openIssue = (id: string) => {
@@ -639,8 +761,12 @@ function CivicPulse() {
               role={role ?? "citizen"}
               isNew={newIssueId === selectedIssue.id}
               onBack={() => setView("reports")}
-              onStatus={(status) => changeStatus(selectedIssue.id, status)}
-              onUpdate={(patch) => updateIssue(selectedIssue.id, patch)}
+              onStatus={(status, note, evidenceImage, extraPatch) =>
+                changeStatus(selectedIssue.id, status, note, evidenceImage, extraPatch)
+              }
+              onUpdate={(patch, timelineNote) =>
+                updateIssue(selectedIssue.id, patch, timelineNote)
+              }
             />
           )}
 
@@ -1472,6 +1598,9 @@ function ReportWizard({
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [image, setImage] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string>("");
+  const [isUploading, setIsUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [linkedIssueId, setLinkedIssueId] = useState<string | null>(null);
@@ -1479,6 +1608,15 @@ function ReportWizard({
   const [aiErrorNotice, setAiErrorNotice] = useState<string | null>(null);
   const [detectedDuplicates, setDetectedDuplicates] = useState<DuplicateSuggestion[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Revoke temporary preview URL on unmount
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrl && imagePreviewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(imagePreviewUrl);
+      }
+    };
+  }, [imagePreviewUrl]);
 
   const steps = ["Report", "Location", "AI analysis", "Review", "Submitted"];
 
@@ -1605,9 +1743,45 @@ function ReportWizard({
     return () => clearTimeout(timer);
   }, [category, description, locationMeta, step, existingIssues, settings?.duplicateRadiusMeters]);
 
-  const submit = () => {
+  const submit = async () => {
     const newId = `CIV-2026-${String(Date.now()).slice(-5)}`;
+    let durableImageUrl: string | undefined = undefined;
+
+    if (imageFile) {
+      setIsUploading(true);
+      const ext = imageFile.name.split(".").pop() || "jpg";
+      const storagePath = `issues/${newId}/report_${Date.now()}.${ext}`;
+      try {
+        durableImageUrl = await uploadEvidenceImage(imageFile, storagePath);
+        // Revoke temporary preview URL now that upload succeeded
+        if (imagePreviewUrl && imagePreviewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(imagePreviewUrl);
+          setImagePreviewUrl("");
+        }
+      } catch (err) {
+        setIsUploading(false);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`Photo upload to Storage failed: ${msg}. Please try again.`);
+        return;
+      } finally {
+        setIsUploading(false);
+      }
+    } else if (image && isDurableImageUrl(image)) {
+      durableImageUrl = sanitizeImageUrl(image);
+    }
+
     setSubmittedId(newId);
+    const now = new Date().toISOString();
+    const initialRecord: CivicTimelineRecord = {
+      id: `event-${Date.now()}`,
+      issueId: newId,
+      status: "NEW",
+      actorName: "Citizen",
+      actorRole: "citizen",
+      note: "Complaint submitted into CivicPulse register.",
+      evidenceImage: durableImageUrl || null,
+      timestamp: now,
+    };
     onSubmit({
       id: newId,
       title: description.length > 48 ? `${description.slice(0, 45)}…` : description || category,
@@ -1629,8 +1803,8 @@ function ReportWizard({
       address: locationMeta.address,
       city: locationMeta.city,
       area: locationMeta.area,
-      createdAt: new Date().toISOString(),
-      ...(image ? { image } : {}),
+      createdAt: now,
+      ...(durableImageUrl ? { image: durableImageUrl } : {}),
       aiSummary:
         aiResult?.summary ??
         `AI found a likely ${category.toLowerCase()} concern near ${locationMeta.address}.`,
@@ -1643,7 +1817,11 @@ function ReportWizard({
             : "Localized disruption reported by residents."),
       duplicateIds: linkedIssueId ? [linkedIssueId] : [],
       notes: [],
-      timeline: defaultTimeline(),
+      timelineRecords: [initialRecord],
+      timeline: deriveMilestonesForIssue(
+        { category, priority, status: "NEW", createdAt: now },
+        [initialRecord],
+      ),
     });
     setStep(4);
   };
@@ -1660,40 +1838,16 @@ function ReportWizard({
       return;
     }
 
-    // Resize/compress client-side to ensure responsive transmission
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const src = e.target?.result as string;
-      const img = new Image();
-      img.onload = () => {
-        const maxWidth = 1200;
-        const maxHeight = 1200;
-        let width = img.width;
-        let height = img.height;
-        if (width > maxWidth || height > maxHeight) {
-          if (width > height) {
-            height = Math.round((height * maxWidth) / width);
-            width = maxWidth;
-          } else {
-            width = Math.round((width * maxHeight) / height);
-            height = maxHeight;
-          }
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL("image/jpeg", 0.85);
-          setImage(compressed);
-        } else {
-          setImage(src);
-        }
-      };
-      img.src = src;
-    };
-    reader.readAsDataURL(file);
+    // Retain File reference for Firebase Storage upload
+    setImageFile(file);
+
+    // Create temporary browser object URL for preview and revoke previous preview
+    const previewUrl = URL.createObjectURL(file);
+    if (imagePreviewUrl && imagePreviewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(imagePreviewUrl);
+    }
+    setImagePreviewUrl(previewUrl);
+    setImage(previewUrl);
   };
 
   return (
@@ -1761,6 +1915,9 @@ function ReportWizard({
                   src={image}
                   alt="Selected civic issue"
                   className="max-h-[220px] max-w-full object-contain"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLElement).style.display = "none";
+                  }}
                 />
                 <div className="mt-3 flex justify-center gap-2">
                   <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
@@ -1770,6 +1927,11 @@ function ReportWizard({
                     variant="outline"
                     size="sm"
                     onClick={() => {
+                      if (imagePreviewUrl && imagePreviewUrl.startsWith("blob:")) {
+                        URL.revokeObjectURL(imagePreviewUrl);
+                      }
+                      setImagePreviewUrl("");
+                      setImageFile(null);
                       setImage("");
                       if (fileRef.current) fileRef.current.value = "";
                     }}
@@ -2242,6 +2404,9 @@ function ReportWizard({
                 src={image}
                 alt="Your uploaded civic issue"
                 className="h-[170px] w-full object-cover"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = "none";
+                }}
               />
             ) : (
               <div className="civic-map grid h-[170px] place-items-center">
@@ -2318,8 +2483,17 @@ function ReportWizard({
               <ArrowLeft />
               Edit details
             </Button>
-            <Button onClick={submit}>
-              Submit civic report <ArrowRight />
+            <Button onClick={submit} disabled={isUploading}>
+              {isUploading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Uploading photo & saving...
+                </>
+              ) : (
+                <>
+                  Submit civic report <ArrowRight />
+                </>
+              )}
             </Button>
           </div>
         </section>
@@ -2512,39 +2686,144 @@ function IssueDetail({
   role: CivicRole;
   isNew: boolean;
   onBack: () => void;
-  onStatus: (status: CivicStatus) => void;
-  onUpdate: (patch: Partial<CivicIssue>) => void;
+  onStatus: (
+    status: CivicStatus,
+    note?: string,
+    evidenceImage?: string,
+    extraPatch?: Partial<CivicIssue>,
+  ) => void;
+  onUpdate: (patch: Partial<CivicIssue>, timelineNote?: string) => void;
 }) {
   const [note, setNote] = useState("");
   const [resolutionNotes, setResolutionNotes] = useState(issue.resolutionNotes ?? "");
   const [beforeImage, setBeforeImage] = useState(issue.beforeImage ?? "");
   const [afterImage, setAfterImage] = useState(issue.afterImage ?? "");
+  const [uploadingField, setUploadingField] = useState<"beforeImage" | "afterImage" | null>(null);
+  const previewUrlsRef = useRef<{ beforeImage?: string; afterImage?: string }>({});
+  const [timelineRecords, setTimelineRecords] = useState<CivicTimelineRecord[]>(
+    () => issue.timelineRecords ?? [],
+  );
+
+  useEffect(() => {
+    return () => {
+      Object.values(previewUrlsRef.current).forEach((url) => {
+        if (url && url.startsWith("blob:")) {
+          URL.revokeObjectURL(url);
+        }
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    setResolutionNotes(issue.resolutionNotes ?? "");
+    setBeforeImage(issue.beforeImage ?? "");
+    setAfterImage(issue.afterImage ?? "");
+    setTimelineRecords(issue.timelineRecords ?? []);
+  }, [issue.id, issue.resolutionNotes, issue.beforeImage, issue.afterImage, issue.timelineRecords]);
+
+  // Real-time listener for the issue's timeline subcollection in Firestore
+  useEffect(() => {
+    const unsub = subscribeToIssueTimeline(issue.id, (records) => {
+      if (records && records.length > 0) {
+        setTimelineRecords(records);
+      }
+    });
+    return () => unsub();
+  }, [issue.id]);
+
   const canManage = role !== "citizen";
-  const timeline = issue.timeline ?? [];
+  const effectiveTimeline = useMemo(
+    () => deriveMilestonesForIssue(issue, timelineRecords),
+    [issue, timelineRecords],
+  );
 
   const saveNote = () => {
     if (!note.trim()) return;
-    onUpdate({ notes: [...(issue.notes ?? []), note.trim()] });
+    onUpdate(
+      { notes: [...(issue.notes ?? []), note.trim()] },
+      `Internal inspection note added: "${note.trim()}"`,
+    );
     setNote("");
     toast.success("Note added to the issue");
   };
 
   const saveResolution = () => {
-    onUpdate({ resolutionNotes, beforeImage, afterImage });
-    onStatus("AWAITING CITIZEN VERIFICATION");
+    if (uploadingField) {
+      toast.error("Please wait for evidence image upload to finish.");
+      return;
+    }
+    const safeBefore = sanitizeImageUrl(beforeImage);
+    const safeAfter = sanitizeImageUrl(afterImage);
+    const noteText = resolutionNotes.trim()
+      ? `Resolution submitted: "${resolutionNotes.trim()}"`
+      : "Resolution submitted with photographic evidence for citizen verification";
+
+    onUpdate({ resolutionNotes, beforeImage: safeBefore, afterImage: safeAfter }, noteText);
+    onStatus(
+      "AWAITING CITIZEN VERIFICATION",
+      noteText,
+      safeAfter || safeBefore,
+      { resolutionNotes, beforeImage: safeBefore, afterImage: safeAfter },
+    );
     toast.success("Resolution submitted for citizen verification");
   };
 
   const loadEvidence =
-    (setter: (value: string) => void, field: "beforeImage" | "afterImage") => (file?: File) => {
+    (setter: (value: string) => void, field: "beforeImage" | "afterImage") =>
+    async (file?: File) => {
       if (!file) return;
-      if (!file.type.startsWith("image/")) {
-        toast.error("Choose an image file");
+      if (!canManage) {
+        toast.error("Only municipal authorities can upload resolution evidence.");
         return;
       }
-      const url = URL.createObjectURL(file);
-      setter(url);
-      onUpdate({ [field]: url });
+      if (!file.type.startsWith("image/")) {
+        toast.error("Choose an image file (PNG, JPG, WebP)");
+        return;
+      }
+      if (file.size > 15 * 1024 * 1024) {
+        toast.error("Image file is too large (maximum 15MB)");
+        return;
+      }
+
+      // 1. Temporary local object URL for preview
+      const tempPreviewUrl = URL.createObjectURL(file);
+      if (previewUrlsRef.current[field] && previewUrlsRef.current[field]?.startsWith("blob:")) {
+        URL.revokeObjectURL(previewUrlsRef.current[field]!);
+      }
+      previewUrlsRef.current[field] = tempPreviewUrl;
+      setter(tempPreviewUrl);
+
+      // 2. Upload to Firebase Storage
+      setUploadingField(field);
+      const label = field === "beforeImage" ? "Before image" : "After image";
+      toast.info(`Uploading ${label.toLowerCase()} to Firebase Storage...`);
+
+      try {
+        const ext = file.name.split(".").pop() || "jpg";
+        const storagePath = `issues/${issue.id}/evidence/${field}_${Date.now()}.${ext}`;
+        const durableUrl = await uploadEvidenceImage(file, storagePath);
+
+        // Revoke temporary preview URL once durable download URL is retrieved
+        if (previewUrlsRef.current[field] && previewUrlsRef.current[field]?.startsWith("blob:")) {
+          URL.revokeObjectURL(previewUrlsRef.current[field]!);
+          delete previewUrlsRef.current[field];
+        }
+
+        setter(durableUrl);
+        onUpdate({ [field]: durableUrl }, `${label} evidence uploaded to Storage.`);
+        toast.success(`${label} saved securely to Firebase Storage.`);
+      } catch (error) {
+        if (previewUrlsRef.current[field] && previewUrlsRef.current[field]?.startsWith("blob:")) {
+          URL.revokeObjectURL(previewUrlsRef.current[field]!);
+          delete previewUrlsRef.current[field];
+        }
+        // Revert UI to previous durable image (or empty)
+        setter(issue[field] ? (sanitizeImageUrl(issue[field]) ?? "") : "");
+        const msg = error instanceof Error ? error.message : String(error);
+        toast.error(`Failed to upload ${label.toLowerCase()} to Storage: ${msg}`);
+      } finally {
+        setUploadingField(null);
+      }
     };
 
   return (
@@ -2587,6 +2866,9 @@ function IssueDetail({
                   src={issue.image}
                   alt="Citizen evidence"
                   className="h-[180px] w-full object-cover"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLElement).style.display = "none";
+                  }}
                 />
               ) : (
                 <div className="civic-map grid h-[180px] place-items-center">
@@ -2642,7 +2924,7 @@ function IssueDetail({
             </div>
 
             <div className="mt-5 space-y-0">
-              {timeline.map((event, index) => (
+              {effectiveTimeline.map((event, index) => (
                 <div key={`${event.label}-${index}`} className="flex gap-3">
                   <div className="flex flex-col items-center">
                     <span
@@ -2654,7 +2936,7 @@ function IssueDetail({
                         <span className="h-1.5 w-1.5 rounded-full bg-current" />
                       )}
                     </span>
-                    {index < timeline.length - 1 && (
+                    {index < effectiveTimeline.length - 1 && (
                       <span className={`h-9 w-px ${event.done ? "bg-primary/40" : "bg-border"}`} />
                     )}
                   </div>
@@ -2667,6 +2949,51 @@ function IssueDetail({
                 </div>
               ))}
             </div>
+
+            {timelineRecords.length > 0 && (
+              <div className="mt-4 border-t border-border pt-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Status history & audit trail ({timelineRecords.length})
+                  </span>
+                  <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+                <div className="mt-3 space-y-2">
+                  {timelineRecords.map((record) => (
+                    <div
+                      key={record.id}
+                      className="flex items-start justify-between gap-3 border border-border/60 bg-background/50 p-2.5 text-[11px]"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-foreground">
+                            {record.actorName}
+                          </span>
+                          {record.actorRole && (
+                            <span className="text-[10px] text-muted-foreground">
+                              ({record.actorRole})
+                            </span>
+                          )}
+                          <Badge className={statusStyle(record.status as CivicStatus)}>
+                            {prettyStatus(record.status as CivicStatus)}
+                          </Badge>
+                        </div>
+                        <p className="text-muted-foreground">{record.note}</p>
+                        {record.evidenceImage && (
+                          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-primary">
+                            <Paperclip className="h-3 w-3" />
+                            <span>Evidence attached</span>
+                          </div>
+                        )}
+                      </div>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {formatTimelineTimestamp(record.timestamp)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
 
           {issue.duplicateIds?.length ? (
@@ -2706,7 +3033,10 @@ function IssueDetail({
                     <Button
                       className="bg-violet-700 hover:bg-violet-800"
                       onClick={() => {
-                        onStatus("RESOLVED");
+                        onStatus(
+                          "RESOLVED",
+                          "Citizen confirmed and verified the issue was successfully resolved.",
+                        );
                         toast.success("Thanks • issue marked resolved");
                       }}
                     >
@@ -2715,7 +3045,10 @@ function IssueDetail({
                     <Button
                       variant="outline"
                       onClick={() => {
-                        onStatus("REOPENED");
+                        onStatus(
+                          "REOPENED",
+                          "Citizen reported that the issue still persists. Reopened for municipal follow-up.",
+                        );
                         toast.success("Issue reopened for municipal follow-up");
                       }}
                     >
@@ -2739,12 +3072,17 @@ function IssueDetail({
                   Assign department
                   <select
                     value={issue.department}
-                    onChange={(event) =>
-                      onUpdate({
-                        department: event.target.value,
-                        status: issue.status === "NEW" ? "ASSIGNED" : issue.status,
-                      })
-                    }
+                    onChange={(event) => {
+                      const nextDept = event.target.value;
+                      const nextStatus = issue.status === "NEW" ? "ASSIGNED" : issue.status;
+                      onUpdate(
+                        {
+                          department: nextDept,
+                          status: nextStatus,
+                        },
+                        `Assigned to department: ${nextDept}`,
+                      );
+                    }}
                     className="mt-1 h-9 w-full border border-input bg-background px-2 text-[11px] text-foreground"
                   >
                     {departments.map((department) => (
@@ -2757,12 +3095,19 @@ function IssueDetail({
                   Assign officer
                   <select
                     value={issue.assignedOfficer ?? ""}
-                    onChange={(event) =>
-                      onUpdate({
-                        assignedOfficer: event.target.value,
-                        status: event.target.value ? "ASSIGNED" : issue.status,
-                      })
-                    }
+                    onChange={(event) => {
+                      const nextOfficer = event.target.value;
+                      const nextStatus = nextOfficer ? "ASSIGNED" : issue.status;
+                      onUpdate(
+                        {
+                          assignedOfficer: nextOfficer,
+                          status: nextStatus,
+                        },
+                        nextOfficer
+                          ? `Assigned to ${nextOfficer} (${issue.department})`
+                          : "Officer assignment cleared",
+                      );
+                    }}
                     className="mt-1 h-9 w-full border border-input bg-background px-2 text-[11px] text-foreground"
                   >
                     <option value="">Unassigned</option>
@@ -2777,7 +3122,10 @@ function IssueDetail({
                   <select
                     value={issue.priority}
                     onChange={(event) =>
-                      onUpdate({ priority: event.target.value as CivicIssue["priority"] })
+                      onUpdate(
+                        { priority: event.target.value as CivicIssue["priority"] },
+                        `Priority updated to ${event.target.value}`,
+                      )
                     }
                     className="mt-1 h-9 w-full border border-input bg-background px-2 text-[11px] text-foreground"
                   >
@@ -2791,7 +3139,12 @@ function IssueDetail({
                   Status
                   <select
                     value={issue.status}
-                    onChange={(event) => onStatus(event.target.value as CivicStatus)}
+                    onChange={(event) =>
+                      onStatus(
+                        event.target.value as CivicStatus,
+                        `Status updated to ${prettyStatus(event.target.value as CivicStatus)} by authority`,
+                      )
+                    }
                     className="mt-1 h-9 w-full border border-input bg-background px-2 text-[11px] text-foreground"
                   >
                     {[
@@ -2799,6 +3152,7 @@ function IssueDetail({
                       "UNDER REVIEW",
                       "ASSIGNED",
                       "IN PROGRESS",
+                      "RESOLUTION SUBMITTED",
                       "AWAITING CITIZEN VERIFICATION",
                       "RESOLVED",
                       "REOPENED",
@@ -2856,36 +3210,64 @@ function IssueDetail({
                 {[
                   ["Before image", beforeImage, setBeforeImage, "beforeImage"],
                   ["After image", afterImage, setAfterImage, "afterImage"],
-                ].map(([label, image, setter, field]) => (
-                  <label
-                    key={label as string}
-                    className="border border-dashed border-border p-3 text-center"
-                  >
-                    <span className="block text-[10px] font-semibold text-muted-foreground">
-                      {label as string}
-                    </span>
-                    {image ? (
-                      <img
-                        src={image as string}
-                        alt={label as string}
-                        className="mt-2 h-24 w-full object-cover"
+                ].map(([label, image, setter, field]) => {
+                  const isUploadingThis = uploadingField === field;
+                  return (
+                    <label
+                      key={label as string}
+                      className={`relative border border-dashed border-border p-3 text-center ${isUploadingThis ? "opacity-70 pointer-events-none" : "cursor-pointer"}`}
+                    >
+                      <span className="block text-[10px] font-semibold text-muted-foreground">
+                        {label as string}
+                      </span>
+                      {image ? (
+                        <div className="relative mt-2">
+                          <img
+                            src={image as string}
+                            alt={label as string}
+                            className="h-24 w-full object-cover"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLElement).style.display = "none";
+                            }}
+                          />
+                          {isUploadingThis && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-[10px] font-semibold text-primary">
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                              Uploading...
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div>
+                          {isUploadingThis ? (
+                            <div className="my-5 flex flex-col items-center justify-center gap-1">
+                              <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                              <span className="text-[10px] text-muted-foreground">Uploading...</span>
+                            </div>
+                          ) : (
+                            <Paperclip className="mx-auto my-5 h-5 w-5 text-muted-foreground" />
+                          )}
+                        </div>
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={isUploadingThis}
+                        className="mt-2 w-full text-[10px]"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) {
+                            loadEvidence(
+                              setter as (value: string) => void,
+                              field as "beforeImage" | "afterImage",
+                            )(file);
+                          }
+                          event.target.value = "";
+                        }}
                       />
-                    ) : (
-                      <Paperclip className="mx-auto my-5 h-5 w-5 text-muted-foreground" />
-                    )}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="mt-2 w-full text-[10px]"
-                      onChange={(event) =>
-                        loadEvidence(
-                          setter as (value: string) => void,
-                          field as "beforeImage" | "afterImage",
-                        )(event.target.files?.[0])
-                      }
-                    />
-                  </label>
-                ))}
+                    </label>
+                  );
+                })}
               </div>
 
               <label className="mt-4 block text-[10px] font-semibold text-muted-foreground">
@@ -2898,22 +3280,71 @@ function IssueDetail({
                 />
               </label>
 
-              <Button className="mt-3 w-full" onClick={saveResolution}>
-                <CheckCheck />
-                Submit for citizen verification
+              <Button
+                className="mt-3 w-full"
+                onClick={saveResolution}
+                disabled={uploadingField !== null}
+              >
+                {uploadingField ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Uploading evidence...
+                  </>
+                ) : (
+                  <>
+                    <CheckCheck />
+                    Submit for citizen verification
+                  </>
+                )}
               </Button>
             </section>
           )}
 
-          {issue.resolutionNotes && !canManage && (
+          {(issue.resolutionNotes || issue.beforeImage || issue.afterImage) && !canManage && (
             <section className="border border-emerald-200 bg-emerald-50 p-5">
               <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-900">
                 <CheckCircle2 className="h-4 w-4" />
-                Municipal resolution
+                Municipal resolution evidence
               </div>
-              <p className="mt-2 text-[11px] leading-5 text-emerald-900/80">
-                {issue.resolutionNotes}
-              </p>
+              {issue.resolutionNotes && (
+                <p className="mt-2 text-[11px] leading-5 text-emerald-900/80">
+                  {issue.resolutionNotes}
+                </p>
+              )}
+              {(issue.beforeImage || issue.afterImage) && (
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  {issue.beforeImage && (
+                    <div className="border border-emerald-200/80 bg-background/90 p-2 text-center">
+                      <span className="block text-[10px] font-semibold text-muted-foreground">
+                        Before work
+                      </span>
+                      <img
+                        src={issue.beforeImage}
+                        alt="Before work"
+                        className="mt-1 h-28 w-full object-cover"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLElement).style.display = "none";
+                        }}
+                      />
+                    </div>
+                  )}
+                  {issue.afterImage && (
+                    <div className="border border-emerald-200/80 bg-background/90 p-2 text-center">
+                      <span className="block text-[10px] font-semibold text-muted-foreground">
+                        After work
+                      </span>
+                      <img
+                        src={issue.afterImage}
+                        alt="After work"
+                        className="mt-1 h-28 w-full object-cover"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLElement).style.display = "none";
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           )}
 

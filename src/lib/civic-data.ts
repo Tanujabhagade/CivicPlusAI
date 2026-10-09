@@ -5,6 +5,7 @@ export type CivicStatus =
   | "UNDER REVIEW"
   | "ASSIGNED"
   | "IN PROGRESS"
+  | "RESOLUTION SUBMITTED"
   | "AWAITING CITIZEN VERIFICATION"
   | "RESOLVED"
   | "REOPENED"
@@ -15,6 +16,18 @@ export type CivicTimelineEvent = {
   detail: string;
   at: string;
   done: boolean;
+};
+
+export type CivicTimelineRecord = {
+  id: string;
+  issueId: string;
+  status: CivicStatus | string;
+  actorName: string;
+  actorId?: string;
+  actorRole?: string;
+  note?: string;
+  evidenceImage?: string | null;
+  timestamp: string;
 };
 
 export type CivicIssue = {
@@ -46,9 +59,13 @@ export type CivicIssue = {
   assignedOfficer?: string;
   notes?: string[];
   resolutionNotes?: string;
+  resolutionEvidence?: string;
+  verificationStatus?: "PENDING" | "VERIFIED" | "REJECTED" | string;
+  resolvedAt?: string;
   beforeImage?: string;
   afterImage?: string;
   timeline?: CivicTimelineEvent[];
+  timelineRecords?: CivicTimelineRecord[];
 };
 
 export type CivicSettings = {

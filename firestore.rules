@@ -81,7 +81,7 @@ service cloud.firestore {
         incoming().title is string && incoming().title.size() <= 250 &&
         incoming().description is string && incoming().description.size() <= 4000 &&
         incoming().category is string &&
-        incoming().status in ['NEW', 'UNDER REVIEW', 'ASSIGNED', 'IN PROGRESS', 'AWAITING CITIZEN VERIFICATION', 'RESOLVED', 'REOPENED'];
+        incoming().status in ['NEW', 'UNDER REVIEW', 'ASSIGNED', 'IN PROGRESS', 'RESOLUTION SUBMITTED', 'AWAITING CITIZEN VERIFICATION', 'RESOLVED', 'REOPENED', 'REJECTED'];
       allow update: if isSignedIn() && (
         isAdmin() ||
         isAuthority() ||
