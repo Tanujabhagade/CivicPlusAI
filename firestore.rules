@@ -1,0 +1,149 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email != null && (request.auth.token.email == 'bhagadetanuja5@gmail.com' || request.auth.token.email == 'tanujabhagade11@gmail.com'))
+      );
+    }
+
+    function isAuthority() {
+      return isSignedIn() && (
+        isAdmin() ||
+        exists(/databases/$(database)/documents/authorities/$(request.auth.uid))
+      );
+    }
+
+    // 2. Users Collection
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin() || isAuthority();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().id == userId &&
+        incoming().email is string &&
+        incoming().role in ['citizen', 'authority', 'admin'] &&
+        (incoming().role != 'admin' || isAdmin());
+      allow update: if (
+        isOwner(userId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phone', 'department', 'ward', 'updatedAt'])
+      ) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // 3. Admins Whitelist
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 4. Authorities Whitelist
+    match /authorities/{authorityId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 5. Issues Collection
+    match /issues/{issueId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() &&
+        isValidId(issueId) &&
+        incoming().id == issueId &&
+        incoming().citizenId == request.auth.uid &&
+        incoming().title is string && incoming().title.size() <= 250 &&
+        incoming().description is string && incoming().description.size() <= 4000 &&
+        incoming().category is string &&
+        incoming().status in ['NEW', 'UNDER REVIEW', 'ASSIGNED', 'IN PROGRESS', 'AWAITING CITIZEN VERIFICATION', 'RESOLVED', 'REOPENED'];
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        isAuthority() ||
+        (
+          // Citizen can verify resolution, link issue, or update description/priority if owner
+          existing().citizenId == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'verificationStatus', 'linkedIssueId', 'description', 'updatedAt'])
+        )
+      );
+      allow delete: if isAdmin();
+
+      // Issue Subcollection: Timeline
+      match /timeline/{timelineId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() &&
+          isValidId(timelineId) &&
+          incoming().issueId == issueId;
+        allow update, delete: if isAdmin();
+      }
+
+      // Issue Subcollection: Notes
+      match /notes/{noteId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() &&
+          isValidId(noteId) &&
+          incoming().issueId == issueId &&
+          incoming().authorId == request.auth.uid;
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // 6. Notifications Collection
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // 7. Audit Logs Collection
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if false; // Append-only audit trail
+    }
+
+    // 8. Public Municipal Metadata (Departments, Wards, SLA Settings)
+    match /departments/{deptId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /wards/{wardId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

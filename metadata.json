@@ -1,0 +1,10 @@
+{
+  "name": "CivicPulse",
+  "description": "From citizen reports to smarter cities. Report issues, track resolutions, and help improve your city.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

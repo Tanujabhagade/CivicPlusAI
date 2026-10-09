@@ -1,0 +1,173 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["citizen", "authority", "admin"] },
+        "department": { "type": "string", "maxLength": 100 },
+        "ward": { "type": "string", "maxLength": 50 },
+        "phone": { "type": "string", "maxLength": 20 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "role", "createdAt"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Trusted admin whitelist record for fast exists() check.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "createdAt"]
+    },
+    "Issue": {
+      "title": "Issue",
+      "description": "Civic complaint reported by citizens and managed by authorities.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 3000 },
+        "category": { "type": "string", "maxLength": 100 },
+        "department": { "type": "string", "maxLength": 100 },
+        "priority": { "type": "string", "enum": ["Critical", "High", "Medium", "Low"] },
+        "status": {
+          "type": "string",
+          "enum": [
+            "NEW",
+            "UNDER REVIEW",
+            "ASSIGNED",
+            "IN PROGRESS",
+            "AWAITING CITIZEN VERIFICATION",
+            "RESOLVED",
+            "REOPENED"
+          ]
+        },
+        "citizenId": { "type": "string", "maxLength": 128 },
+        "citizenName": { "type": "string", "maxLength": 100 },
+        "citizenEmail": { "type": "string", "maxLength": 150 },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "location": { "type": "string", "maxLength": 250 },
+        "address": { "type": "string", "maxLength": 250 },
+        "city": { "type": "string", "maxLength": 100 },
+        "ward": { "type": "string", "maxLength": 50 },
+        "image": { "type": "string", "maxLength": 500000 },
+        "aiSummary": { "type": "string", "maxLength": 1000 },
+        "aiConfidence": { "type": "number" },
+        "aiCategory": { "type": "string", "maxLength": 100 },
+        "aiSeverity": { "type": "string", "maxLength": 50 },
+        "aiDepartment": { "type": "string", "maxLength": 100 },
+        "assignedOfficer": { "type": "string", "maxLength": 100 },
+        "linkedIssueId": { "type": "string", "maxLength": 64 },
+        "resolutionEvidence": { "type": "string", "maxLength": 500000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "description", "category", "status", "citizenId", "createdAt"]
+    },
+    "IssueTimeline": {
+      "title": "IssueTimeline",
+      "description": "Historical timeline transitions and audit trail for an issue.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "issueId": { "type": "string" },
+        "status": { "type": "string" },
+        "actorId": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actorRole": { "type": "string" },
+        "note": { "type": "string", "maxLength": 1000 },
+        "evidenceImage": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "issueId", "status", "actorId", "timestamp"]
+    },
+    "IssueNote": {
+      "title": "IssueNote",
+      "description": "Internal or public comments on an issue.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "issueId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorRole": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1000 },
+        "isInternal": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "issueId", "authorId", "text", "timestamp"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User notification for issue progress.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "issueId": { "type": "string" },
+        "title": { "type": "string", "maxLength": 150 },
+        "message": { "type": "string", "maxLength": 500 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "title", "message", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "System audit log for administrative tracking.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "actorId": { "type": "string" },
+        "actorEmail": { "type": "string" },
+        "actorRole": { "type": "string" },
+        "action": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetId": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Registered user accounts and role definitions."
+    },
+    "/admins/{userId}": {
+      "schema": "Admin",
+      "description": "Designated administrator lookup."
+    },
+    "/issues/{issueId}": {
+      "schema": "Issue",
+      "description": "Civic complaints and status tracking."
+    },
+    "/issues/{issueId}/timeline/{timelineId}": {
+      "schema": "IssueTimeline",
+      "description": "Status progression events for an issue."
+    },
+    "/issues/{issueId}/notes/{noteId}": {
+      "schema": "IssueNote",
+      "description": "Internal and public notes attached to an issue."
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "Citizen and municipal notifications."
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Administrative actions and SLA adjustments."
+    }
+  }
+}
